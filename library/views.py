@@ -5,6 +5,7 @@ from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, Loa
 from rest_framework.decorators import action
 from django.utils import timezone
 from .tasks import send_loan_notification
+from django.db import transaction
 
 class AuthorViewSet(viewsets.ModelViewSet):
     queryset = Author.objects.all()
@@ -17,18 +18,23 @@ class BookViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def loan(self, request, pk=None):
         book = self.get_object()
-        if book.available_copies < 1:
-            return Response({'error': 'No available copies.'}, status=status.HTTP_400_BAD_REQUEST)
-        member_id = request.data.get('member_id')
+        
         try:
-            member = Member.objects.get(id=member_id)
+            member = Member.objects.get(id=book.member_id)
         except Member.DoesNotExist:
             return Response({'error': 'Member does not exist.'}, status=status.HTTP_400_BAD_REQUEST)
-        loan = Loan.objects.create(book=book, member=member)
-        book.available_copies -= 1
-        book.save()
-        send_loan_notification.delay(loan.id)
-        return Response({'status': 'Book loaned successfully.'}, status=status.HTTP_201_CREATED)
+        try: 
+            with transaction.atomic(): 
+                if Book.objects.select_for_update():
+                    return Response({'error': 'No available copies.'}, status=status.HTTP_400_BAD_REQUEST)
+                loan = Loan.objects.create(book=book, member=member)
+                book.available_copies -= 1
+                book.save()
+                send_loan_notification.delay(loan.id)
+                return Response({'status': 'Book loaned successfully.'}, status=status.HTTP_201_CREATED)
+             
+        except Exception as e:
+            return Response({'status': "failed"}, status=status.HTTP_500_SEVER_ERROR)
 
     @action(detail=True, methods=['post'])
     def return_book(self, request, pk=None):
